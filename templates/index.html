@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="將 YouTube Music 播放清單轉移到 Spotify 的本機工具">
+    <title>YT Music → Spotify</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div class="eyebrow">LOCAL PLAYLIST MIGRATOR</div>
+        <h1><span>YouTube Music</span><i>→</i><span>Spotify</span></h1>
+        <p>先檢查、再轉移。所有登入資訊只留在這台電腦的記憶體中。</p>
+      </header>
+
+      <section class="card auth-card">
+        <div class="step-number">01</div>
+        <div class="card-main">
+          <div class="card-heading">
+            <div>
+              <h2>連結 Spotify</h2>
+              <p>使用 PKCE 安全登入，不需要 Client Secret。</p>
+            </div>
+            <div id="authBadge" class="badge neutral">尚未連結</div>
+          </div>
+          <div id="authForm" class="inline-form">
+            <label class="grow">
+              <span>Spotify Client ID</span>
+              <input id="clientId" type="text" autocomplete="off" placeholder="貼上 Developer Dashboard 的 Client ID">
+            </label>
+            <button id="authButton" class="button primary">連結 Spotify</button>
+          </div>
+          <div class="setup-note">
+            <strong>第一次使用：</strong>在 Spotify Developer Dashboard 建立 App，將
+            <button class="copy-value" data-copy="{{ redirect_uri }}">{{ redirect_uri }}</button>
+            加入 Redirect URIs。
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="sourceCard">
+        <div class="step-number">02</div>
+        <div class="card-main">
+          <div class="card-heading">
+            <div>
+              <h2>讀取來源清單</h2>
+              <p>公開清單不需要 Cookie；私人清單可從已登入的瀏覽器讀取。</p>
+            </div>
+          </div>
+          <label>
+            <span>YouTube Music 播放清單網址</span>
+            <input id="playlistUrl" type="url" placeholder="https://music.youtube.com/playlist?list=...">
+          </label>
+          <div class="options-grid">
+            <label>
+              <span>私人清單 Cookie</span>
+              <select id="cookiesBrowser">
+                <option value="none">不使用（公開清單）</option>
+                <option value="chrome">Google Chrome</option>
+                <option value="edge">Microsoft Edge</option>
+                <option value="firefox">Firefox</option>
+              </select>
+            </label>
+            <label>
+              <span>自動勾選門檻 <output id="thresholdValue">74%</output></span>
+              <input id="threshold" type="range" min="0.55" max="0.90" value="0.74" step="0.01">
+            </label>
+          </div>
+          <button id="analyzeButton" class="button primary full">分析並尋找 Spotify 歌曲</button>
+          <div id="progress" class="progress hidden">
+            <span class="spinner"></span>
+            <div><strong>正在比對歌曲</strong><small>大型清單可能需要幾分鐘，請保持此頁開啟。</small></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="reviewCard" class="card review-card hidden">
+        <div class="step-number">03</div>
+        <div class="card-main">
+          <div class="review-header">
+            <div>
+              <div class="eyebrow">MATCH REVIEW</div>
+              <h2 id="playlistTitle">比對結果</h2>
+              <p id="summaryText"></p>
+            </div>
+            <a class="button ghost small" href="/api/report.csv">下載 CSV 報告</a>
+          </div>
+          <div class="legend">
+            <span><i class="dot high"></i>高信心</span>
+            <span><i class="dot medium"></i>建議檢查</span>
+            <span><i class="dot low"></i>未勾選</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th class="check-col"></th><th>YouTube Music</th><th>Spotify 配對</th><th>分數</th></tr></thead>
+              <tbody id="matchesBody"></tbody>
+            </table>
+          </div>
+          <div class="transfer-panel">
+            <label class="grow">
+              <span>新播放清單名稱</span>
+              <input id="targetName" type="text" maxlength="100">
+            </label>
+            <label class="toggle-label">
+              <input id="publicPlaylist" type="checkbox">
+              <span class="toggle"></span>
+              公開播放清單
+            </label>
+            <button id="transferButton" class="button spotify">建立 Spotify 播放清單</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="successCard" class="success-card hidden">
+        <div class="success-icon">✓</div>
+        <div><div class="eyebrow">TRANSFER COMPLETE</div><h2 id="successTitle">轉移完成</h2><p id="successText"></p></div>
+        <a id="spotifyLink" class="button spotify" target="_blank" rel="noopener">在 Spotify 開啟</a>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden" role="alert"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
