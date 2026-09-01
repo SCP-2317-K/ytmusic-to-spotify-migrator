@@ -23,6 +23,12 @@ function showToast(message, kind = "error") {
   showToast.timer = window.setTimeout(() => toast.classList.add("hidden"), 7000);
 }
 
+function showAnalyzeError(message = "") {
+  const panel = $("#analyzeError");
+  panel.textContent = message;
+  panel.classList.toggle("hidden", !message);
+}
+
 function setBusy(button, busy, label) {
   if (!button.dataset.label) button.dataset.label = button.textContent;
   button.disabled = busy;
@@ -83,6 +89,7 @@ $("#analyzeButton").addEventListener("click", async () => {
   const button = $("#analyzeButton");
   try {
     setBusy(button, true, "分析中…");
+    showAnalyzeError();
     $("#progress").classList.remove("hidden");
     $("#reviewCard").classList.add("hidden");
     $("#successCard").classList.add("hidden");
@@ -96,6 +103,7 @@ $("#analyzeButton").addEventListener("click", async () => {
     });
     renderAnalysis(currentAnalysis);
   } catch (error) {
+    showAnalyzeError(error.message);
     showToast(error.message);
   } finally {
     setBusy(button, false);

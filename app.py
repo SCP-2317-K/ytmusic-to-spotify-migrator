@@ -44,6 +44,20 @@ class AppError(Exception):
         self.details = details
 
 
+class YtDlpLogger:
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def debug(self, message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        pass
+
+    def error(self, message: str) -> None:
+        self.errors.append(str(message))
+
+
 @dataclass
 class SourceTrack:
     index: int
@@ -362,9 +376,11 @@ def _youtube_url_ok(value: str) -> bool:
 def extract_youtube_playlist(url: str, cookies_browser: str = "none") -> tuple[dict[str, Any], list[SourceTrack]]:
     if not _youtube_url_ok(url):
         raise AppError("請貼上含有 list=... 的 YouTube Music／YouTube 播放清單網址。")
+    yt_logger = YtDlpLogger()
     options: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
+        "logger": yt_logger,
         "skip_download": True,
         "extract_flat": "in_playlist",
         "ignoreerrors": True,
@@ -378,9 +394,17 @@ def extract_youtube_playlist(url: str, cookies_browser: str = "none") -> tuple[d
             info = downloader.extract_info(url, download=False)
     except Exception as exc:
         hint = "若這是私人清單，請選擇已登入 YouTube Music 的瀏覽器後重試。"
-        raise AppError(f"無法讀取 YouTube Music 播放清單。{hint}", 422, str(exc)) from exc
+        details = yt_logger.errors[-1] if yt_logger.errors else str(exc)
+        raise AppError(f"無法讀取 YouTube Music 播放清單。{hint}", 422, details) from exc
     if not info:
-        raise AppError("YouTube Music 沒有回傳播放清單資料。", 422)
+        details = yt_logger.errors[-1] if yt_logger.errors else "YouTube Music 沒有回傳播放清單資料。"
+        if "does not exist" in details.casefold():
+            raise AppError(
+                "YouTube 回報這個播放清單不存在。請從播放清單頁面的「分享 → 複製連結」重新取得完整網址。",
+                422,
+                details,
+            )
+        raise AppError("YouTube Music 沒有回傳播放清單資料。", 422, details)
 
     entries = list(info.get("entries") or [])
     tracks: list[SourceTrack] = []
