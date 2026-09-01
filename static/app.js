@@ -1,5 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 let currentAnalysis = null;
+let bulkPollTimer = null;
+let bulkCompletionNotice = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -111,6 +113,107 @@ $("#analyzeButton").addEventListener("click", async () => {
   }
 });
 
+const bulkActiveStates = new Set(["queued", "extracting", "creating", "matching", "adding"]);
+
+function renderBulkStatus(job) {
+  if (!job || job.status === "idle") return;
+  $("#bulkStatus").classList.remove("hidden");
+  const total = Number(job.total || 0);
+  const current = Number(job.scanned || job.processed || 0);
+  const percent = total ? Math.min(100, Math.round((current / total) * 100)) : 0;
+  $("#bulkProgress").max = total || 1;
+  $("#bulkProgress").value = total ? current : 0;
+  $("#bulkPercent").textContent = total ? `${percent}%` : "讀取中";
+  $("#bulkMessage").textContent = job.message || "處理中…";
+  $("#bulkStats").textContent = total
+    ? `已完成批次 ${job.processed || 0}/${total} · 已加入 ${job.added || 0} · 找不到 ${job.unmatched || 0} · 低信心候選 ${job.low_confidence || 0}`
+    : "正在取得播放清單歌曲數量…";
+
+  const playlistLink = $("#bulkSpotifyLink");
+  if (job.spotify_playlist_url) {
+    playlistLink.href = job.spotify_playlist_url;
+    playlistLink.classList.remove("hidden");
+  }
+
+  const errorPanel = $("#bulkError");
+  if (job.error) {
+    const details = typeof job.error_details === "string" ? `\n${job.error_details}` : "";
+    errorPanel.textContent = job.error + details;
+    errorPanel.classList.remove("hidden");
+  } else {
+    errorPanel.classList.add("hidden");
+  }
+
+  $("#bulkResumeButton").classList.toggle("hidden", !job.can_resume);
+  $("#bulkCancelButton").classList.toggle("hidden", !bulkActiveStates.has(job.status));
+  setBusy($("#bulkStartButton"), bulkActiveStates.has(job.status), "自動轉移進行中…");
+
+  if (job.status === "complete" && bulkCompletionNotice !== job.id) {
+    bulkCompletionNotice = job.id;
+    showToast(`大型清單轉移完成：已加入 ${job.added} 首。`, "success");
+  }
+}
+
+function scheduleBulkPoll(delay = 1800) {
+  window.clearTimeout(bulkPollTimer);
+  bulkPollTimer = window.setTimeout(async () => {
+    try {
+      const job = await api("/api/bulk/status");
+      renderBulkStatus(job);
+      if (bulkActiveStates.has(job.status)) scheduleBulkPoll();
+    } catch (error) {
+      showToast(error.message);
+      scheduleBulkPoll(5000);
+    }
+  }, delay);
+}
+
+$("#bulkStartButton").addEventListener("click", async () => {
+  const status = await refreshStatus();
+  if (!status.authenticated) return showToast("請先完成 Spotify 連結。");
+  const playlistUrl = $("#playlistUrl").value.trim();
+  if (!playlistUrl) return showToast("請貼上 YouTube Music 播放清單網址。");
+  try {
+    setBusy($("#bulkStartButton"), true, "正在啟動…");
+    $("#bulkError").classList.add("hidden");
+    const job = await api("/api/bulk/start", {
+      method: "POST",
+      body: JSON.stringify({
+        playlist_url: playlistUrl,
+        cookies_browser: $("#cookiesBrowser").value,
+        threshold: Number($("#threshold").value),
+        include_low_confidence: $("#bulkIncludeLow").checked,
+        name: $("#bulkName").value.trim(),
+        public: $("#bulkPublic").checked,
+      }),
+    });
+    renderBulkStatus(job);
+    scheduleBulkPoll(500);
+  } catch (error) {
+    setBusy($("#bulkStartButton"), false);
+    showToast(error.message);
+  }
+});
+
+$("#bulkResumeButton").addEventListener("click", async () => {
+  try {
+    const job = await api("/api/bulk/resume", { method: "POST", body: "{}" });
+    renderBulkStatus(job);
+    scheduleBulkPoll(500);
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+$("#bulkCancelButton").addEventListener("click", async () => {
+  try {
+    const job = await api("/api/bulk/cancel", { method: "POST", body: "{}" });
+    renderBulkStatus(job);
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
 function renderAnalysis(analysis) {
   $("#playlistTitle").textContent = analysis.playlist.title;
   $("#targetName").value = analysis.playlist.title;
@@ -183,5 +286,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     showToast(`Spotify 登入未完成：${params.get("message") || "未知錯誤"}`);
     history.replaceState({}, "", "/");
   }
-  try { await refreshStatus(); } catch (error) { showToast(error.message); }
+  try {
+    await refreshStatus();
+    const job = await api("/api/bulk/status");
+    renderBulkStatus(job);
+    if (bulkActiveStates.has(job.status)) scheduleBulkPoll(500);
+  } catch (error) { showToast(error.message); }
 });

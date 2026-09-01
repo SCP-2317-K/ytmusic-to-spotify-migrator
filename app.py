@@ -27,7 +27,7 @@ REDIRECT_URI = f"http://{APP_HOST}:{APP_PORT}/callback"
 SPOTIFY_API = "https://api.spotify.com/v1"
 SPOTIFY_ACCOUNTS = "https://accounts.spotify.com"
 SESSION_TTL_SECONDS = 12 * 60 * 60
-MAX_PLAYLIST_ITEMS = 2_000
+MAX_PLAYLIST_ITEMS = 5_000
 
 app = Flask(__name__)
 app.config.update(JSON_AS_ASCII=False, MAX_CONTENT_LENGTH=2 * 1024 * 1024)
@@ -226,16 +226,19 @@ class SpotifyClient:
     def profile(self) -> dict[str, Any]:
         return self.request("GET", "/me")
 
-    def search_tracks(self, title: str, artist: str) -> list[dict[str, Any]]:
+    def search_tracks(self, title: str, artist: str, broad_only: bool = False) -> list[dict[str, Any]]:
         clean_title = title.replace('"', " ").strip()
         clean_artist = artist.replace('"', " ").strip()
-        query = f'track:"{clean_title}"'
-        if clean_artist:
-            query += f' artist:"{clean_artist}"'
+        if broad_only:
+            query = f"{clean_title} {clean_artist}".strip()
+        else:
+            query = f'track:"{clean_title}"'
+            if clean_artist:
+                query += f' artist:"{clean_artist}"'
         payload = self.request("GET", "/search", params={"q": query, "type": "track", "limit": 10})
         items = payload.get("tracks", {}).get("items", [])
 
-        if not items:
+        if not items and not broad_only:
             payload = self.request(
                 "GET",
                 "/search",
@@ -454,10 +457,17 @@ def extract_youtube_playlist(url: str, cookies_browser: str = "none") -> tuple[d
     }, tracks
 
 
-def analyze_tracks(client: SpotifyClient, source_tracks: list[SourceTrack], threshold: float) -> list[dict[str, Any]]:
+def analyze_tracks(
+    client: SpotifyClient,
+    source_tracks: list[SourceTrack],
+    threshold: float,
+    progress_callback: Any = None,
+    delay_seconds: float = 0.0,
+    broad_search: bool = False,
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    for source in source_tracks:
-        candidates = client.search_tracks(source.title, source.artist)
+    for position, source in enumerate(source_tracks, start=1):
+        candidates = client.search_tracks(source.title, source.artist, broad_only=broad_search)
         ranked = []
         for candidate in candidates:
             scores = score_candidate(source, candidate)
@@ -485,7 +495,136 @@ def analyze_tracks(client: SpotifyClient, source_tracks: list[SourceTrack], thre
                 "confidence": "high" if score["total"] >= 0.86 else "medium" if confident else "low",
             }
         )
+        if progress_callback:
+            progress_callback(position, len(source_tracks))
+        if delay_seconds:
+            time.sleep(delay_seconds)
     return results
+
+
+def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in job.items() if not key.startswith("_")}
+
+
+def _bulk_transfer_worker(session_data: dict[str, Any]) -> None:
+    job = session_data["bulk_job"]
+    try:
+        job.update({"status": "extracting", "message": "正在讀取完整 YouTube Music 播放清單…", "error": None})
+        if not job.get("_source_tracks"):
+            playlist_meta, source_tracks = extract_youtube_playlist(
+                job["source_url"],
+                job["cookies_browser"],
+            )
+            job["_source_tracks"] = source_tracks
+            job["_results"] = []
+            job["playlist_meta"] = playlist_meta
+            job["total"] = len(source_tracks)
+            job["playlist_name"] = job["requested_name"] or playlist_meta["title"]
+
+        source_tracks = job["_source_tracks"]
+        client = SpotifyClient(session_data)
+        if not job.get("spotify_playlist_id"):
+            job.update({"status": "creating", "message": "正在建立 Spotify 播放清單…"})
+            description = f"由 YouTube Music 自動分批轉移。來源：{job['source_url']}"
+            playlist = client.create_playlist(job["playlist_name"], job["public"], description)
+            job["spotify_playlist_id"] = playlist["id"]
+            job["spotify_playlist_url"] = playlist.get("external_urls", {}).get("spotify", "")
+
+        batch_size = int(job.get("batch_size", 100))
+        total = len(source_tracks)
+        start = int(job.get("next_index", 0))
+        job["_cancel"] = False
+
+        while start < total:
+            if job.get("_cancel"):
+                job.update({"status": "cancelled", "message": "已在上一個完成批次後停止。", "can_resume": True})
+                return
+
+            end = min(start + batch_size, total)
+            batch = source_tracks[start:end]
+            job.update(
+                {
+                    "status": "matching",
+                    "batch_start": start + 1,
+                    "batch_end": end,
+                    "scanned": start,
+                    "message": f"正在搜尋第 {start + 1}–{end} 首…",
+                }
+            )
+
+            def update_progress(done: int, _batch_total: int) -> None:
+                job["scanned"] = start + done
+                job["message"] = f"正在搜尋第 {start + done}/{total} 首…"
+
+            batch_results = analyze_tracks(
+                client,
+                batch,
+                job["threshold"],
+                progress_callback=update_progress,
+                delay_seconds=0.08,
+                broad_search=True,
+            )
+            uris: list[str] = []
+            for item in batch_results:
+                match = item.get("match")
+                should_transfer = bool(match and (job["include_low_confidence"] or item["selected"]))
+                item["transferred"] = should_transfer
+                if should_transfer:
+                    uris.append(match["uri"])
+
+            job.update({"status": "adding", "message": f"正在加入第 {start + 1}–{end} 首到同一個 Spotify 清單…"})
+            if uris:
+                client.add_items(job["spotify_playlist_id"], uris)
+
+            job["_results"].extend(batch_results)
+            job["processed"] = end
+            job["next_index"] = end
+            job["added"] += len(uris)
+            job["matched"] += sum(1 for item in batch_results if item.get("match"))
+            job["unmatched"] += sum(1 for item in batch_results if not item.get("match"))
+            job["low_confidence"] += sum(
+                1 for item in batch_results if item.get("match") and not item.get("selected")
+            )
+            start = end
+
+        analysis = {
+            "playlist": job["playlist_meta"],
+            "tracks": job["_results"],
+            "threshold": job["threshold"],
+            "created_at": time.time(),
+        }
+        session_data["analysis"] = analysis
+        job.update(
+            {
+                "status": "complete",
+                "processed": total,
+                "scanned": total,
+                "can_resume": False,
+                "message": f"完成：已加入 {job['added']} 首，找不到 {job['unmatched']} 首。",
+            }
+        )
+    except AppError as exc:
+        job.update(
+            {
+                "status": "error",
+                "error": exc.message,
+                "error_details": exc.details,
+                "message": "分批轉移已暫停；已完成的批次仍保留在 Spotify。",
+                "can_resume": bool(job.get("_source_tracks") and job.get("spotify_playlist_id")),
+                "scanned": job.get("processed", 0),
+            }
+        )
+    except Exception as exc:
+        app.logger.exception("Bulk transfer failed")
+        job.update(
+            {
+                "status": "error",
+                "error": f"發生未預期的錯誤：{exc}",
+                "message": "分批轉移已暫停；已完成的批次仍保留在 Spotify。",
+                "can_resume": bool(job.get("_source_tracks") and job.get("spotify_playlist_id")),
+                "scanned": job.get("processed", 0),
+            }
+        )
 
 
 @app.get("/")
@@ -566,9 +705,97 @@ def spotify_callback():
 @app.post("/api/logout")
 def logout():
     data = g.local_session
-    for key in ("access_token", "refresh_token", "expires_at", "profile", "analysis"):
+    if data.get("bulk_job"):
+        data["bulk_job"]["_cancel"] = True
+    for key in ("access_token", "refresh_token", "expires_at", "profile", "analysis", "bulk_job"):
         data.pop(key, None)
     return jsonify({"ok": True})
+
+
+@app.post("/api/bulk/start")
+def bulk_start():
+    body = _json_body()
+    data = g.local_session
+    existing = data.get("bulk_job")
+    if existing and existing.get("status") in {"queued", "extracting", "creating", "matching", "adding"}:
+        raise AppError("已有大型清單轉移正在進行。", 409)
+
+    url = str(body.get("playlist_url", "")).strip()
+    if not _youtube_url_ok(url):
+        raise AppError("請貼上含有 list=... 的 YouTube Music／YouTube 播放清單網址。")
+    cookies_browser = str(body.get("cookies_browser", "none")).casefold()
+    if cookies_browser not in {"none", "chrome", "edge", "firefox"}:
+        raise AppError("Cookie 瀏覽器選項不正確。")
+    try:
+        threshold = float(body.get("threshold", 0.74))
+    except (TypeError, ValueError) as exc:
+        raise AppError("比對門檻格式錯誤。") from exc
+    if not 0.5 <= threshold <= 0.95:
+        raise AppError("比對門檻必須介於 0.50 到 0.95。")
+
+    SpotifyClient(data)._refresh_if_needed()
+    job = {
+        "id": secrets.token_urlsafe(12),
+        "status": "queued",
+        "message": "準備開始…",
+        "source_url": url,
+        "cookies_browser": cookies_browser,
+        "threshold": threshold,
+        "include_low_confidence": bool(body.get("include_low_confidence", True)),
+        "requested_name": str(body.get("name", "")).strip()[:100],
+        "playlist_name": "",
+        "public": bool(body.get("public", False)),
+        "batch_size": 100,
+        "total": 0,
+        "processed": 0,
+        "scanned": 0,
+        "next_index": 0,
+        "added": 0,
+        "matched": 0,
+        "unmatched": 0,
+        "low_confidence": 0,
+        "spotify_playlist_id": "",
+        "spotify_playlist_url": "",
+        "can_resume": False,
+        "error": None,
+        "error_details": None,
+        "_cancel": False,
+    }
+    data["bulk_job"] = job
+    threading.Thread(target=_bulk_transfer_worker, args=(data,), daemon=True).start()
+    return jsonify(_public_job(job)), 202
+
+
+@app.get("/api/bulk/status")
+def bulk_status():
+    job = g.local_session.get("bulk_job")
+    if not job:
+        return jsonify({"status": "idle"})
+    return jsonify(_public_job(job))
+
+
+@app.post("/api/bulk/resume")
+def bulk_resume():
+    data = g.local_session
+    job = data.get("bulk_job")
+    if not job:
+        raise AppError("沒有可繼續的大型清單工作。", 404)
+    if job.get("status") not in {"error", "cancelled"}:
+        raise AppError("目前的工作不需要繼續。", 409)
+    SpotifyClient(data)._refresh_if_needed()
+    job.update({"status": "queued", "message": "準備從上一個完成批次繼續…", "error": None, "error_details": None})
+    threading.Thread(target=_bulk_transfer_worker, args=(data,), daemon=True).start()
+    return jsonify(_public_job(job)), 202
+
+
+@app.post("/api/bulk/cancel")
+def bulk_cancel():
+    job = g.local_session.get("bulk_job")
+    if not job:
+        raise AppError("目前沒有大型清單工作。", 404)
+    job["_cancel"] = True
+    job["message"] = "將在目前批次結束後停止…"
+    return jsonify(_public_job(job))
 
 
 @app.post("/api/analyze")
@@ -644,7 +871,7 @@ def report_csv():
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
-        ["序號", "YouTube 歌名", "YouTube 藝人", "YouTube 網址", "Spotify 歌名", "Spotify 藝人", "Spotify 網址", "總分", "信心"]
+        ["序號", "YouTube 歌名", "YouTube 藝人", "YouTube 網址", "Spotify 歌名", "Spotify 藝人", "Spotify 網址", "總分", "信心", "已轉移"]
     )
     for item in analysis["tracks"]:
         source, match = item["source"], item.get("match") or {}
@@ -659,6 +886,7 @@ def report_csv():
                 match.get("url", ""),
                 item["score"]["total"],
                 item["confidence"],
+                "是" if item.get("transferred", item.get("selected", False)) else "否",
             ]
         )
     filename = re.sub(r"[^\w\-]+", "_", analysis["playlist"]["title"], flags=re.UNICODE).strip("_") or "report"

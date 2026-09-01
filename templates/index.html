@@ -74,6 +74,43 @@
             <div><strong>正在比對歌曲</strong><small>大型清單可能需要幾分鐘，請保持此頁開啟。</small></div>
           </div>
           <div id="analyzeError" class="error-panel hidden" role="alert"></div>
+
+          <div class="bulk-panel">
+            <div class="bulk-heading">
+              <div>
+                <div class="eyebrow">LARGE PLAYLIST MODE</div>
+                <h3>大型清單自動分批轉移</h3>
+              </div>
+              <span>每批 100 首</span>
+            </div>
+            <p>在背景逐批搜尋，並持續加入同一個 Spotify 播放清單。遇到 API 限制時可從上一個完成批次繼續；請保持 PowerShell 程式開啟。</p>
+            <label>
+              <span>Spotify 播放清單名稱（留空會沿用 YouTube 名稱）</span>
+              <input id="bulkName" type="text" maxlength="100" placeholder="例如：Go Your Own Way">
+            </label>
+            <div class="bulk-options">
+              <label class="checkbox-row">
+                <input id="bulkIncludeLow" type="checkbox" checked>
+                <span>加入所有找到的候選，包括低於門檻的配對（可能包含誤配）</span>
+              </label>
+              <label class="checkbox-row">
+                <input id="bulkPublic" type="checkbox">
+                <span>建立公開 Spotify 播放清單</span>
+              </label>
+            </div>
+            <button id="bulkStartButton" class="button spotify full">開始自動分批轉移</button>
+            <div id="bulkStatus" class="bulk-status hidden">
+              <div class="bulk-status-line"><strong id="bulkMessage">準備開始…</strong><span id="bulkPercent">0%</span></div>
+              <progress id="bulkProgress" max="1" value="0"></progress>
+              <div id="bulkStats" class="bulk-stats"></div>
+              <div id="bulkError" class="error-panel hidden" role="alert"></div>
+              <div class="bulk-actions">
+                <a id="bulkSpotifyLink" class="button spotify small hidden" target="_blank" rel="noopener">開啟 Spotify 清單</a>
+                <button id="bulkResumeButton" class="button primary small hidden">從上次完成處繼續</button>
+                <button id="bulkCancelButton" class="button ghost small">批次結束後停止</button>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
