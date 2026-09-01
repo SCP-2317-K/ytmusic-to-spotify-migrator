@@ -11,6 +11,17 @@
 
 Spotify Access Token、Refresh Token 與 YouTube Cookie 都不會寫入磁碟；關閉程式後即從記憶體消失。Client ID 只由瀏覽器的 Local Storage 記住。
 
+## 從 GitHub 取得
+
+已安裝 Git 時，可在終端機執行：
+
+```bash
+git clone https://github.com/SCP-2317-K/ytmusic-to-spotify-migrator.git
+cd ytmusic-to-spotify-migrator
+```
+
+不熟悉 Git 也可以在 GitHub 專案頁按 **Code → Download ZIP**，解壓縮後再依下方方式執行。
+
 ## 隱私設計
 
 - 專案不內建任何 Spotify Client ID 或 Client Secret，每位使用者建立並使用自己的 Spotify App。
